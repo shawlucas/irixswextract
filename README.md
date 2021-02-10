@@ -19,6 +19,7 @@ Example compilation:
 
 Known bugs:
 Path to output directory only supports a relative path.
+sometimes segfaults. still working that out
 
 Example usage:
 ``irixswextract . c_dev.idb ../../n64dev/root``
