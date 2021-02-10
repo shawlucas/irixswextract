@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <lzw.h>
+#include <fcntl.h>
+#include <assert.h>
 
 struct Archive
 {
@@ -111,6 +115,60 @@ static void ensure_parent_dir(char *path)
     }
 }
 
+int uncompressFile(const char* filename, void* buf, size_t size) {
+    FILE* output;
+    size_t numread;
+    lzwFile* lzw;
+    char* infile = (char *)malloc(2000);
+    char* outfile = (char *)malloc(2000);
+
+    sprintf(infile, "%s/%s.z", outdirname, filename);
+    sprintf(outfile, "%s/%s", outdirname, filename);
+
+    output = fopen(outfile, "wb+");
+
+    //assert(output != NULL);
+    
+    lzw = lzw_open(infile, O_RDONLY);
+
+    if (lzw == NULL) {
+        fprintf(stderr, "could not open file\n");
+        remove(infile);
+        remove(outfile);
+        free(infile);
+        free(outfile);
+        fclose(output);
+        return 1;
+    }
+    
+    while ((numread = lzw_read(lzw, buf, size)) > 0)
+        if (fwrite(buf, 1, numread, output) != numread) {
+            fprintf(stderr, "fwrite() failed on %s\n", outfile);
+            remove(infile);
+            remove(outfile);
+            free(infile);
+            free(outfile);
+            fclose(output);
+            return 1;
+        }
+    
+    if (lzw_close(lzw)) {
+        fprintf(stderr, "could not close file\n");
+        remove(infile);
+        remove(outfile);
+        free(infile);
+        free(outfile);
+        fclose(output);
+        return 1;
+    }
+    
+    remove(infile);
+    free(infile);
+    free(outfile);
+    fclose(output);
+    return 0;
+}
+
 static void write_output_file(const char *filename, const void *data, size_t size,
     int perms, int decompress)
 {
@@ -127,7 +185,7 @@ static void write_output_file(const char *filename, const void *data, size_t siz
     ensure_parent_dir(path);
 
     // write the file
-    file = fopen(path, "wb");
+    file = fopen(path, "wb+");
     if (file == NULL)
         fatal_error("failed to create file '%s'", path);
     if (fwrite(data, size, 1, file) != 1)
@@ -136,16 +194,30 @@ static void write_output_file(const char *filename, const void *data, size_t siz
 
     if (decompress)
     {
-        char cmd[1000];
+        unsigned char* cmd = malloc(size);
 
+        if (uncompressFile(filename, cmd, size) != 0) {
+            fprintf(stderr, "uncompressFile returned non-zero value!\n");
+        }
+
+        free(cmd);
         // decompress the file
-        path[pathlen] = 0;  // remove .z suffix
-        snprintf(cmd, sizeof(cmd), "uncompress -f %s", path);
-        system(cmd);
+        
+       // snprintf(cmd, sizeof(cmd), "uncompress -f %s", path);
+       // system(cmd);
     }
 
-    if (chmod(path, perms) != 0)
+    if (decompress) {
+        char *tempDecompPath = malloc(pathlen + 3);
+        sprintf(tempDecompPath, "%s/%s", outdirname, filename);
+        if (chmod(tempDecompPath, perms) != 0) {
+            printf("warning: could not set permissions of '%s'\n", tempDecompPath);
+        }
+    } else if (chmod(path, perms) != 0) {
         printf("warning: could not set permissions of '%s'\n", path);
+    }
+    
+        
 
     free(path);
 }
@@ -214,9 +286,11 @@ static void handle_idb_line(char *line)
 
     char *filename = NULL;  // name of file to extract
     char *archivename = NULL;  // archive containing the file
+    char* symLinkName = (char *)malloc(1024);
     int cmpsize = -1;  // compressed size of file
     int size = -1;  // uncompressed size of file
     int perms = 0;  // file permissions
+    uint8_t isSymLink = 0;
     const struct Archive *archive;
     const uint8_t *data;
 
@@ -229,11 +303,14 @@ static void handle_idb_line(char *line)
         switch (i)
         {
         case 0:  // "f" or "l" depending on whether it's a file or link
-            if (strcmp(currtoken, "f") != 0)
-                return;  // only process actual files, not symbolic links
+            if (strcmp(currtoken, "f") && strcmp(currtoken, "l"))
+                return;
             break;
         case 1:  // file permissions
             perms = strtol(currtoken, NULL, 8);
+            if (perms == 292) {
+                perms = 420;
+            }
             break;
         case 4:  // file name
             filename = currtoken;
@@ -245,11 +322,43 @@ static void handle_idb_line(char *line)
             if (i >= 7)  // parameters
             {
                 int n;
+                char* symval = malloc(1000);
 
                 if (sscanf(currtoken, "cmpsize(%i)", &n) == 1)
                     cmpsize = n;
                 else if (sscanf(currtoken, "size(%i)", &n) == 1)
                     size = n;
+                    if (size == 0) {
+                        char* buf = (char *)malloc(1024);
+                        sprintf(buf, "%s/%s", outdirname, filename);
+                        ensure_parent_dir(buf);
+                        FILE* createfile = fopen(buf, "wb+");
+                        fclose(createfile);
+                        return;
+                    }
+                else if (sscanf(currtoken, "symval(%s)", symval) == 1) {
+               //     char* newToken = (char *)malloc(1024);
+               //     newToken = strtok(symval, ")");
+                    char* symname = (char *)malloc(1024);
+                    char* real = (char *)malloc(1024);
+                    char* token = strtok(symval, ")");
+                    char* root = realpath(outdirname, NULL);
+                    
+                    if (memcmp(token, "/", 1) == 0) {
+                        sprintf(symname, "%s%s", outdirname, filename);
+                        sprintf(real, "%s/%s", root, symval);
+                    } else {
+                        sprintf(symname, "%s/%s", outdirname, filename);
+                        ensure_parent_dir(symname);
+                        real = symval;
+                    }                            
+                    if (symlink(real, symname) != 0) {
+                        fprintf(stderr, "symlink error, %s\n", strerror(errno));
+                    }
+                    isSymLink = 1;
+                    free(symname);
+                    free(real);
+            }
             }
             break;
         }
@@ -258,6 +367,7 @@ static void handle_idb_line(char *line)
         i++;
     }
 
+if (isSymLink == 0) {
     if (filename == NULL || cmpsize < 0)
         fatal_error("invalid file entry");
 
@@ -276,12 +386,15 @@ static void handle_idb_line(char *line)
     if (cmpsize != 0)  // compressed file
     {
         // check magic value
-        if (data[0] != 0x1F || data[1] != 0x9D)
-            fatal_error("invalid compression header");
+        if (data[0] != 0x1F || data[1] != 0x9D) {
+            fprintf(stderr, "invalid compression header on file %s\n", filename);
+        } else {   
         size = cmpsize;
+        }
     }
 
     write_output_file(filename, data, size, perms, (cmpsize != 0));
+}
 }
 
 static void extract_all_files()
@@ -332,3 +445,4 @@ int main(int argc, char **argv)
 
     return 0;
 }
+
