@@ -81,6 +81,8 @@ static const struct Archive *load_archive(const char *name) {
   // load new archive
 
   path = malloc(strlen(srcdirname) + 1 + strlen(name) + 1);
+  printf("srcdirname = %s\n", srcdirname);
+  printf("name = %s\n", name);
   sprintf(path, "%s/%s", srcdirname, name);
 
   i = loadedArchivesCount;
@@ -174,16 +176,23 @@ static void write_output_file(const char *filename, const void *data,
   else
     sprintf(path, "%s/%s", outdirname, filename);
 
-  // printf("writing output file '%s'\n", path);
+  printf("writing output file '%s' with size %ld decompress = %d\n", path, size,
+         decompress);
   ensure_parent_dir(path);
 
+  printf("writing output file '%s' with size %ld decompress = %d\n", path, size,
+         decompress);
+
   // write the file
-  file = fopen(path, "wb+");
+  file = fopen(path, "wb");
   if (file == NULL)
     fatal_error("failed to create file '%s'", path);
-  if (fwrite(data, size, 1, file) != 1)
+  if (fwrite(data, 1, size, file) != size)
     fatal_error("error writing to '%s'", path);
   fclose(file);
+
+  if (size == 0)
+    return;
 
   if (decompress) {
     unsigned char *cmd = malloc(size);
@@ -193,10 +202,6 @@ static void write_output_file(const char *filename, const void *data,
     }
 
     free(cmd);
-    // decompress the file
-
-    // snprintf(cmd, sizeof(cmd), "uncompress -f %s", path);
-    // system(cmd);
   }
 
   if (decompress) {
@@ -273,8 +278,8 @@ static void handle_idb_line(char *line) {
   int cmpsize = -1; // compressed size of file
   int size = -1;    // uncompressed size of file
   int perms = 0;    // file permissions
-  uint8_t isSymLink = 0;
   const struct Archive *archive;
+  uint8_t isSymLink = 0;
   const uint8_t *data;
 
   // iterate over space-separated tokens in the line
@@ -285,7 +290,7 @@ static void handle_idb_line(char *line) {
     switch (i) {
     case 0: // "f" or "l" depending on whether it's a file or link
       if (strcmp(currtoken, "f") && strcmp(currtoken, "l"))
-        return;
+        return; // only process actual files, not symbolic links
       break;
     case 1: // file permissions
       perms = strtol(currtoken, NULL, 8);
@@ -296,9 +301,9 @@ static void handle_idb_line(char *line) {
     case 4: // file name
       filename = currtoken;
       break;
-    case 6: // archive name
-      archivename = currtoken;
-      break;
+    /*case 10:  // archive name
+        archivename = currtoken;
+        break;*/
     default:
       if (i >= 7) // parameters
       {
@@ -339,6 +344,11 @@ static void handle_idb_line(char *line) {
           free(symname);
           free(real);
         }
+
+        if (((!((strncmp(currtoken, "ultra", 6))) == 0))) {
+          archivename = currtoken;
+          break;
+        }
       }
       break;
     }
@@ -366,11 +376,9 @@ static void handle_idb_line(char *line) {
     if (cmpsize != 0) // compressed file
     {
       // check magic value
-      if (data[0] != 0x1F || data[1] != 0x9D) {
-        fprintf(stderr, "invalid compression header on file %s\n", filename);
-      } else {
-        size = cmpsize;
-      }
+      if (data[0] != 0x1F || data[1] != 0x9D)
+        fatal_error("invalid compression header");
+      size = cmpsize;
     }
 
     write_output_file(filename, data, size, perms, (cmpsize != 0));
